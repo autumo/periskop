@@ -2,12 +2,16 @@ package servicediscovery
 
 import (
 	"context"
+	"strings"
 
 	"log"
 
 	gokit_log "github.com/go-kit/kit/log"
-	prometheus_discovery "github.com/modularise/prometheus-discovery/discovery"
-	prometheus_discovery_config "github.com/modularise/prometheus-discovery/discovery/config"
+	"github.com/prometheus/common/model"
+	prometheus_discovery "github.com/prometheus/prometheus/discovery"
+	prometheus_discovery_config "github.com/prometheus/prometheus/discovery/config"
+	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/pkg/relabel"
 	"github.com/soundcloud/periskop/config"
 )
 
@@ -22,7 +26,8 @@ func EmptyResolvedAddresses() ResolvedAddresses {
 }
 
 type Resolver struct {
-	sdConfig map[string]prometheus_discovery_config.ServiceDiscoveryConfig
+	sdConfig       map[string]prometheus_discovery_config.ServiceDiscoveryConfig
+	relabelConfigs []*relabel.Config
 }
 
 func NewResolver(service config.Service) Resolver {
@@ -31,7 +36,8 @@ func NewResolver(service config.Service) Resolver {
 	}
 
 	return Resolver{
-		sdConfig: sdConfig,
+		sdConfig:       sdConfig,
+		relabelConfigs: service.RelabelConfigs,
 	}
 }
 
@@ -57,11 +63,37 @@ func (r Resolver) Resolve() <-chan ResolvedAddresses {
 		for {
 			var addresses []string
 			groups := <-manager.SyncCh()
+
 			for _, groupArr := range groups {
 				for i := 0; i < len(groupArr); i++ {
 					group := groupArr[i]
 					for _, target := range group.Targets {
+						discoveredLabels := group.Labels.Merge(target)
+						var labelMap = make(map[string]string)
+						for k, v := range discoveredLabels.Clone() {
+							labelMap[string(k)] = string(v)
+						}
+
+						processedLabels := relabel.Process(labels.FromMap(labelMap), r.relabelConfigs...)
+
+						var labels = make(model.LabelSet)
+						for k, v := range processedLabels.Map() {
+							labels[model.LabelName(k)] = model.LabelValue(v)
+						}
+
+						// Drop empty targets (drop in relabeling).
+						if processedLabels == nil {
+							continue
+						}
+
+						for k := range labels {
+							if strings.HasPrefix(string(k), "__") {
+								delete(labels, k)
+							}
+						}
+
 						addresses = append(addresses, string(target["__address__"]))
+						log.Println(addresses)
 					}
 				}
 			}
